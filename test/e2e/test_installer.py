@@ -9,6 +9,7 @@ import backoff
 import boto3
 import botocore
 import dataclasses
+import json
 import logging
 import os
 
@@ -21,6 +22,7 @@ from deadline_test_fixtures import (
     DeadlineClient,
     DeadlineWorkerConfiguration,
     EC2InstanceWorker,
+    WindowsInstanceWorkerBase,
     Job,
     TaskStatus,
 )
@@ -53,6 +55,7 @@ class TestWindowsInstaller:
     # Names for tests
     CUSTOM_AGENT_NAME = "custom-agent-worker"
     DEFAULT_AGENT_NAME = "deadline-worker"
+    WINDOWS_SECRET = "WindowsPasswordSecret"
     DEFAULT_JOB_USER = "job-user"
     ADMIN_SID = "S-1-5-32-544"
 
@@ -67,6 +70,7 @@ class TestWindowsInstaller:
         return dataclasses.replace(
             worker_config,
             agent_user=self.CUSTOM_AGENT_NAME,
+            windows_user_secret=self.WINDOWS_SECRET,
             allow_shutdown=False,
             start_service=False,
             fleet=deadline_resources.scaling_fleet,
@@ -181,6 +185,36 @@ Get-LocalUser | Select-Object Name, Enabled | Format-Table -AutoSize
             f"Default worker agent user {self.DEFAULT_AGENT_NAME} should not exist"
         )
 
+    def test_worker_agent_credentials(
+        self,
+        class_worker: WindowsInstanceWorkerBase,
+    ) -> None:
+        LOG.info("Verifying the worker agent credentials")
+        user_secret = class_worker.get_windows_user_secret(secret_id=self.WINDOWS_SECRET)
+        secret_json = json.loads(user_secret.stdout)
+        password = secret_json["password"]
+
+        LOG.info(f"OMG DELETE THIS PASSWORD: {password}")
+
+        verify_credentials_command = f"""
+Add-Type -AssemblyName System.DirectoryServices.AccountManagement
+$contextType = [System.DirectoryServices.AccountManagement.ContextType]::Machine
+$principalContext = New-Object System.DirectoryServices.AccountManagement.PrincipalContext($contextType)
+
+$username = "{self.CUSTOM_AGENT_NAME}"
+$password = "{password}"
+
+$isValid = $principalContext.ValidateCredentials($username, $password)
+
+if ($isValid) {{
+    Write-Host "Credentials are valid."
+}}
+"""
+        check_creds_result = class_worker.send_command(command=verify_credentials_command)
+        assert "Credentials are valid." in check_creds_result.stdout, (
+            "Worker agent credentials validation failed."
+        )
+    
     def test_custom_agent_runs_job_as_user(
         self,
         class_worker: EC2InstanceWorker,
@@ -215,7 +249,9 @@ Get-LocalUser | Select-Object Name, Enabled | Format-Table -AutoSize
 
         LOG.info("Wait for Worker Service to begin Stopping")
         # This can take over 5 minutes
-        class_worker.wait_until_worker_stopping(seconds_between_checks=25)
+        class_worker.wait_until_desired_worker_status(
+            seconds_between_checks=25, desired_status="STOPPING"
+        )
 
         ec2_client = boto3.client("ec2")
 
