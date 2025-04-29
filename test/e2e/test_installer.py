@@ -9,7 +9,6 @@ import backoff
 import boto3
 import botocore
 import dataclasses
-import json
 import logging
 import os
 
@@ -190,11 +189,6 @@ Get-LocalUser | Select-Object Name, Enabled | Format-Table -AutoSize
         class_worker: WindowsInstanceWorkerBase,
     ) -> None:
         LOG.info("Verifying the worker agent credentials")
-        user_secret = class_worker.get_windows_user_secret(secret_id=self.WINDOWS_SECRET)
-        secret_json = json.loads(user_secret.stdout)
-        password = secret_json["password"]
-
-        LOG.info(f"OMG DELETE THIS PASSWORD: {password}")
 
         verify_credentials_command = f"""
 Add-Type -AssemblyName System.DirectoryServices.AccountManagement
@@ -202,9 +196,8 @@ $contextType = [System.DirectoryServices.AccountManagement.ContextType]::Machine
 $principalContext = New-Object System.DirectoryServices.AccountManagement.PrincipalContext($contextType)
 
 $username = "{self.CUSTOM_AGENT_NAME}"
-$password = "{password}"
 
-$isValid = $principalContext.ValidateCredentials($username, $password)
+$isValid = $principalContext.ValidateCredentials($username, "$({class_worker.get_windows_user_secret_cmd(secret_id=self.WINDOWS_SECRET)})")
 
 if ($isValid) {{
     Write-Host "Credentials are valid."
@@ -214,7 +207,7 @@ if ($isValid) {{
         assert "Credentials are valid." in check_creds_result.stdout, (
             "Worker agent credentials validation failed."
         )
-    
+
     def test_custom_agent_runs_job_as_user(
         self,
         class_worker: EC2InstanceWorker,
